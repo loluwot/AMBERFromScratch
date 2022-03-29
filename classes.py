@@ -7,8 +7,8 @@ import pickle
 from ortools.sat.python import cp_model
 from collections import defaultdict
 import string
-
-
+import itertools
+import re
 RAD2DEG = 360/2/math.pi
 def normalize(vec):
     return vec/np.linalg.norm(vec)
@@ -18,6 +18,7 @@ scene = canvas()
 class hashabledict(dict):
     def __hash__(self):
         return hash(tuple(sorted(self.items())))
+
 class Atom:
     def __init__(self, name, pos_vec, units='ang', vel_vec=np.array([0,0,0])):
         conv_factor = UNITS[units]/UNITS[STANDARD_UNIT]
@@ -38,13 +39,14 @@ class Atom:
         return np.linalg.norm(self.pos_vec - other.pos_vec)
 
     def angle(self, other1, other2):
-        d23 = np.linalg.norm(other2.pos_vec - self.pos_vec)
-        d21 = np.linalg.norm(other1.pos_vec - self.pos_vec)
-        d13 = np.linalg.norm(other2.pos_vec - other1.pos_vec)
-        return np.arccos((d23**2 + d21**2 - d13**2)/(2*d23*d21))*RAD2DEG
+        #OTHER1 -- SELF -- OTHER2
+        O2S = other2.pos_vec - self.pos_vec
+        O1S = other1.pos_vec - self.pos_vec
+        return np.arccos(np.dot(O2S, O1S)/np.linalg.norm(O2S)/np.linalg.norm(O1S))*RAD2DEG
 
     def __str__(self):
         return self.name
+
     def copy(self):
         return pickle.loads(pickle.dumps(self))
 
@@ -54,51 +56,40 @@ class Molecule:
         self.atoms_to_id = {}
         for i, atom in enumerate(atoms):
             self.atoms_to_id[atom] = i  
-        self.adj_list = [[] for __ in range(len(atoms))]
         if adj_list is not None:
             self.adj_list = adj_list
         else:
-            for i, atom1 in enumerate(atoms):
-                for j, atom2 in enumerate(atoms[:i]):
-                    if atom1.dist(atom2) <= K*(atom1.radius + atom2.radius):
-                        self.adj_list[i].append(j)
-                        self.adj_list[j].append(i)
+            self.adj_list = [[] for _ in range(len(atoms))]
+            for i, j in itertools.combinations(range(len(atoms)),2):
+                atom1, atom2 = atoms[i], atoms[j]
+                if atom1.dist(atom2) <= K*(atom1.radius + atom2.radius):
+                    self.adj_list[i].append(j)
+                    self.adj_list[j].append(i)
+            
         self.nx_graph = nx.Graph()
         self.nx_graph.add_nodes_from([(i, {'name':self.atoms[i].name, 'n':len(self.adj_list[i])}) for i in range(len(self.atoms))])
-        for i, neighbours in enumerate(adj_list):
+        for i, neighbours in enumerate(self.adj_list):
             self.nx_graph.add_edges_from([(i, x) for x in neighbours])
         self.bos = {}
         self.resonance_states = []
 
-    def bond_length(self, atom1, atom2):
+    def get_atom(self, atom1):
         if isinstance(atom1, int):
-            atom1 = self.atoms[atom1]
-        if isinstance(atom2, int):
-            atom2 = self.atoms[atom2]
+            return self.atoms[atom1]
+        return atom1
+
+    def bond_length(self, atom1, atom2):
+        atom1, atom2 = map(self.get_atom, [atom1, atom2])
         return atom1.dist(atom2)
 
     def bond_angle(self, atom1, atom2, atom3):
         #atom1 -- atom2 -- atom3
-        if isinstance(atom1, int):
-            atom1 = self.atoms[atom1]
-        if isinstance(atom2, int):
-            atom2 = self.atoms[atom2]
-        if isinstance(atom3, int):
-            atom3 = self.atoms[atom3]
-
+        atom1, atom2, atom3 = map(self.get_atom, [atom1, atom2, atom3])
         return atom2.angle(atom1, atom3)
 
     def torsion_angle(self, atom1, atom2, atom3, atom4):
         #atom1 -- atom2 -- atom3 -- atom4
-        if isinstance(atom1, int):
-            atom1 = self.atoms[atom1]
-        if isinstance(atom2, int):
-            atom2 = self.atoms[atom2]
-        if isinstance(atom3, int):
-            atom3 = self.atoms[atom3]
-        if isinstance(atom4, int):
-            atom4 = self.atoms[atom4]
-
+        atom1, atom2, atom3, atom4 = map(self.get_atom, [atom1, atom2, atom3, atom4])
         r21 = normalize(atom1.pos_vec - atom2.pos_vec)
         r23 = normalize(atom3.pos_vec - atom2.pos_vec)
         r34 = normalize(atom4.pos_vec - atom3.pos_vec)
@@ -112,14 +103,7 @@ class Molecule:
         #           |
         #         atom3
         #oop of r41
-        if isinstance(atom1, int):
-            atom1 = self.atoms[atom1]
-        if isinstance(atom2, int):
-            atom2 = self.atoms[atom2]
-        if isinstance(atom3, int):
-            atom3 = self.atoms[atom3]
-        if isinstance(atom4, int):
-            atom4 = self.atoms[atom4]
+        atom1, atom2, atom3, atom4 = map(self.get_atom, [atom1, atom2, atom3, atom4])
         r41 = normalize(atom1.pos_vec - atom4.pos_vec)
         r42 = normalize(atom2.pos_vec - atom4.pos_vec)
         r43 = normalize(atom3.pos_vec - atom4.pos_vec)
@@ -128,73 +112,47 @@ class Molecule:
 
     @classmethod
     def read_xyz(cls, filename, unit='ang'):
-        #print(unit)
         conv_factor = UNITS[unit]/UNITS[STANDARD_UNIT]
-        f = open(filename)
         atoms = []
+        f = open(filename)
         try:
             n_atoms = int(f.readline())
         except:
             raise Exception('Invalid format.')
-        adj_list = [[] for __ in range(n_atoms)]
         f.readline() #skipping comments
-        for i, l in enumerate(f):
-            strings = []
-            temp = ''
-            last = ''
-            for c in l:
-                if c != ' ':
-                    if last == ' ':
-                        if len(temp) > 0:
-                            strings.append(temp)
-                        temp = c
-                    else:
-                        temp += c
-                last = c
-            strings.append(temp)
-            a, x, y, z = strings
-            pos_vec = None
+        for l in f:
+            a, *xyz = re.split(r'\s+', l.strip())
+            print(xyz)
             try:
-                pos_vec = np.array([float(x)*conv_factor, float(y)*conv_factor, float(z)*conv_factor])
+                pos_vec = np.array(list(map(float, xyz)))*conv_factor
             except:
                 raise Exception('Invalid format.')
             atoms.append(Atom(a, pos_vec, units=STANDARD_UNIT))
-            for j, atom in enumerate(atoms[:-1]):
-                if atom.dist(atoms[-1]) <= K*(atom.radius + atoms[-1].radius):
-                    adj_list[i].append(j)
-                    adj_list[j].append(i)
-        return Molecule(atoms, adj_list)
+        return Molecule(atoms)
 
     def __str__(self):
         temp = ''.join([str(atom) for atom in self.atoms])
         return temp + ' ' + str(self.adj_list)
 
     def draw(self, bond_radius=30):
-        
         for index in range(len(self.resonance_states)):
             for atom in self.atoms:
                 sphere(canvas=scene, pos=vector(*atom.pos_vec)+ vector(0,1,0)*index*700, radius=atom.radius/2, color=atom.color)
-                #print(atom.ring_types)
             for i, bonds in enumerate(self.adj_list):
-                for neighbour in bonds:
-                    if neighbour < i:
-                        a12 = self.atoms[neighbour].pos_vec - self.atoms[i].pos_vec
-                        pos = self.atoms[i].pos_vec
-                        #bo = self.bos[neighbour, i]
-                        #print(self.resonance_states)
-                        bo = self.resonance_states[index][neighbour, i]
-                        #print(bo)
-                        perp = hat(vector(*a12).cross(scene.forward))
-                        increment = bond_radius*2/(bo+1)
-                        for ii in range(bo):
-                            cylinder(canvas=scene, pos=vector(*pos)-perp*(bond_radius-increment*(ii+1))+ vector(0,1,0)*index*700, axis=vector(*a12), radius=10)
-                        #cylinder(canvas=scene, pos=vector(*pos), axis=vector(*a12), radius=10)
+                for neighbour in filter(lambda x: x < i, bonds):
+                    a12 = self.atoms[neighbour].pos_vec - self.atoms[i].pos_vec
+                    pos = self.atoms[i].pos_vec
+                    bo = self.resonance_states[index][neighbour, i]
+                    perp = hat(vector(*a12).cross(scene.forward))
+                    increment = bond_radius*2/(bo+1)
+                    for ii in range(bo):
+                        cylinder(canvas=scene, pos=vector(*pos)-perp*(bond_radius-increment*(ii+1))+ vector(0,1,0)*index*700, axis=vector(*a12), radius=10)
+                    #cylinder(canvas=scene, pos=vector(*pos), axis=vector(*a12), radius=10)
     def basic_typing(self):
         #print(self.nx_graph.nodes.data())
         for name, graph, id1 in BASIC_TYPES:
             GM = isomorphism.GraphMatcher(self.nx_graph, graph, node_match=isomorphism.categorical_node_match(['name', 'n'],[None, None]))
             for s in GM.subgraph_isomorphisms_iter():
-                #print(name)
                 self.atoms[list(s.keys())[id1]].basic_type = name
         for i, atom in enumerate(self.atoms):
             if atom.basic_type is None:
@@ -208,7 +166,6 @@ class Molecule:
                     hs += 1
             self.atoms[i].nhs = hs
 
-        
     def copy(self):
         return pickle.loads(pickle.dumps(self))
 
@@ -222,16 +179,12 @@ class Molecule:
             cur_states.extend(arr[index])
             for possible, a in arr[index]:
                 for i, value in enumerate(possible):
-                    #print(tup)
-                    #print(value)
                     temp = possible[::]
                     if value+1 >= len(APS[self.atoms[i].basic_type]):
                         continue
                     temp[i] = value+1
-                    #print(index - APS[self.atoms[i].basic_type][value][1] + APS[self.atoms[i].basic_type][value+1][1])
                     new_index = index - APS[self.atoms[i].basic_type][value][1] + APS[self.atoms[i].basic_type][value+1][1]
                     arr[new_index].append((temp, new_index))
-                    #cur_states.append(temp)
             index += 1
             #print(len(cur_states))
         return cur_states
@@ -254,7 +207,6 @@ class Molecule:
             model.Add(s == ac_vs[i])
         
         class VarArraySolutionPrinter(cp_model.CpSolverSolutionCallback):
-            """Print intermediate solutions."""
             def __init__(self, variables, limit):
                 cp_model.CpSolverSolutionCallback.__init__(self)
                 self.__variables = variables
@@ -267,27 +219,15 @@ class Molecule:
             def get_solutions(self):
                 #print(self.solutions)
                 return self.solutions
-        
-        
-        print('A')
         solver = cp_model.CpSolver()
         callbacks = VarArraySolutionPrinter(variables, 2000)
-        print('A')
         status = solver.SearchForAllSolutions(model, callbacks)
-        print('A')
-        print(solver.StatusName(status))
-        # if status == cp_model.OPTIMAL:
-        #     # for key, value in variables.items():
-        #     #     #print('{} BO {}'.format(key, solver.Value(value)))
-        #     #     variables[key] = solver.Value(value)
-        #     # #print(self.adj_list)
         return callbacks.solutions
-        # else:
-        #     #print(':(')
-        #     return -1
+
     def assign_bo(self):
         self.basic_typing()
         vss = self.generate_vs()
+        print(vss)
         min_index = 100000
         for vs, index in vss:
             #print(index)
@@ -327,7 +267,7 @@ class Molecule:
                                 break
                     tup = (min(node, ring[(i+1) % len(ring)]), max(node, ring[(i+1) % len(ring)]))
                     bonds.append(resonance[tup])
-                    if self.atoms[node  ].basic_type not in PLANAR_TYPES: 
+                    if self.atoms[node].basic_type not in PLANAR_TYPES: 
                         isPlanar = False
                     self.atoms[node].ring_types.add('R{}'.format(len(ring)))
                 external_bonds = bonds[::]
@@ -354,6 +294,7 @@ class Molecule:
                 for bond in external_bonds:
                     if bond == last:
                         hasExternalDouble = False
+                
                 if alternating:
                     ring_type[ring_key] = 1
                 
@@ -364,11 +305,9 @@ class Molecule:
                         ring_type[ring_key] = 2
                     elif allSingle:
                         ring_type[ring_key] = 5
-                
-
-                print(bonds)
-                print(alternating)
-                print(hasExternalDouble)
+                # print(bonds)
+                # print(alternating)
+                # print(hasExternalDouble)
                 
         for ring in rings:
             for node in ring:
@@ -390,7 +329,6 @@ class Molecule:
         unions = ring.split('.')
         total = set()
         for union in unions:
-            
             intersects = union.split(',')
             temp = set(self.find_ringprim(atoms, intersects[0]))
             #print(temp)
@@ -399,6 +337,7 @@ class Molecule:
                 #print(temp)
             total = total.union(temp)
         return list(total)
+
     def find_all(self, atoms, atom_str):
         vals = ['', '', '']
         mode = 0
@@ -509,5 +448,50 @@ class Molecule:
                 filtered_atoms.append(at)
         return filtered_atoms
 
+    def get_avg_bo(self, atom1, atom2):
+        bond = tuple(sorted([atom1, atom2]))
+        bos = [state[bond] for state in self.resonance_states]
+        return sum(bos)/max(1, len(bos))
+
+    @staticmethod
+    def sum_featurizer(fs):
+        return (sum([(i + 1)*f for i, f in enumerate(fs)])*FINGERPRINT_HASH_CONSTANT) % 2305843009213693951
     
+    @staticmethod
+    def average_aggregator(fs):
+        return (hash(sum(fs)/max(1, len(fs)))*FINGERPRINT_HASH_CONSTANT) % 2305843009213693951
+    
+    def fingerprint(self, radius=2, initial=True, **args):
+        args = defaultdict(lambda: None, {**default_fingerprint, **args})
+        featurizer = args['featurizer'] or self.sum_featurizer
+        aggregator = args['aggregator'] or (lambda x: (sum(x)*FINGERPRINT_HASH_CONSTANT) % 2305843009213693951)
+        if hasattr(self, 'cache_fingerprint'):
+            if hasattr(self, 'fingerprint_level'):
+                if self.fingerprint_level == radius:
+                    return self.cache_fingerprint
+
+        if initial:
+            self.node_messages = [hash(atom.basic_type) for atom in self.atoms]
+            self.cur_fingerprint = [0 for _ in range(args['fingerprint_length'])]
+
+        print(self.node_messages)
+        for messages in self.node_messages:
+            self.cur_fingerprint[messages % args['fingerprint_length']] |= 1
+         
+        if radius == 0:
+            return self.cur_fingerprint
+
+        self.temp_messages = [[] for atom in self.atoms]
+        #pass messages
+        for i in range(len(self.atoms)):
+            for j in self.adj_list[i]:
+                message = featurizer([self.node_messages[i], self.node_messages[j], hash(self.get_avg_bo(i, j))])
+                self.temp_messages[j].append(message)
+        #aggregate messages
+        for i in range(len(self.atoms)):
+            self.node_messages[i] = aggregator(self.temp_messages[i])
+        
+        return self.fingerprint(radius=radius-1, initial=False, **args)
+
+
 

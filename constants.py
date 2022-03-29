@@ -50,4 +50,6 @@ APS['P1OO'] = [(1, 0), (0, 1)]
 APS['OX1'] = [(2, 0), (1, 1), (3, 64)]
 APS['OX2'] = [(2 , 0), (1, 32), (3, 64)]
 
+default_fingerprint = {'fingerprint_length': 1024}
+FINGERPRINT_HASH_CONSTANT = 10000
 PLANAR_TYPES = ['CX3', 'NX2', 'NX3', 'OX2']
